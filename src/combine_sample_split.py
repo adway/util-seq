@@ -13,9 +13,13 @@ results_df = pd.concat(
     ignore_index=True,
 )
 
+if "z_hat" not in results_df:
+    results_df["z_hat"] = pd.NA
+
 clean_df = results_df.dropna(
     subset=[
         "theta_hat",
+        "z_hat",
         "b_hat",
         "inner_power",
         "inner_seq_stopping_time",
@@ -31,6 +35,8 @@ summary_df = (
     .agg(
         mean_theta_hat=("theta_hat", "mean"),
         sd_theta_hat=("theta_hat", "std"),
+        mean_z_hat=("z_hat", "mean"),
+        sd_z_hat=("z_hat", "std"),
         mean_b_hat=("b_hat", "mean"),
         sd_b_hat=("b_hat", "std"),
         power=("inner_power", "mean"),

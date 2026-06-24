@@ -18,7 +18,7 @@ from helpers.sample import stopping_time
 M = 500
 INNER_M = 50
 
-thetas = [0.05, 0.10, 0.5, 1]
+thetas = [0.10, 0.5, 1, 2]
 N_grid = [1_000, 2_000, 5_000, 10_000]
 alphas = [0.05]
 lambdas = [0.50]
@@ -28,6 +28,8 @@ N_JOBS = 500
 
 OUTDIR = ROOT / "sample_split_results"
 LOGDIR = ROOT / "run_logs"
+B_LOWER = 0.00001
+B_UPPER = 0.99999
 
 
 def split_into_chunks(tasks, n_chunks):
@@ -47,55 +49,77 @@ def root_objective(b, lam, alpha, psi, theta_hat, N):
     return lam * seq_term + (1 - lam) * (1 - b)
 
 
-def bounded_objective_b(b, lam, alpha, psi, theta_hat, N):
-    seq_term = root_objective(b, 1, alpha, psi, theta_hat, N)
-    return lam * np.clip(seq_term, 0, 1) + (1 - lam) * (1 - b)
-
-
-def minimize_bounded_objective_b(lam, alpha, psi, theta_hat, N):
+def largest_root(lam, alpha, psi, theta_hat, N):
     if not np.isfinite(theta_hat) or theta_hat <= 0:
-        return np.nan
+        return np.nan, np.nan
 
     def z_to_open_probability(z):
         b = scipy.stats.norm.cdf(z)
-        return np.clip(b, np.nextafter(0.0, 1.0), np.nextafter(1.0, 0.0))
+        return np.clip(b, B_LOWER, B_UPPER)
 
-    def seq_term_z(z):
+    def root_objective_z(z):
         z_alpha = scipy.stats.norm.ppf(1 - alpha)
-        return - (1 - psi) + (
+        seq_term = - (1 - psi) + (
             np.sqrt(1 - psi) * (z_alpha + z)
             / (theta_hat * np.sqrt(N))
         )
+        return lam * seq_term + (1 - lam) * (1 - scipy.stats.norm.cdf(z))
 
-    def objective_z(z):
-        b = scipy.stats.norm.cdf(z)
-        return lam * np.clip(seq_term_z(z), 0, 1) + (1 - lam) * (1 - b)
+    if lam == 0:
+        return np.nan, np.nan
 
-    z_alpha = scipy.stats.norm.ppf(1 - alpha)
-    sqrt_q = np.sqrt(1 - psi)
-    theta_sqrt_n = theta_hat * np.sqrt(N)
-    z_seq_zero = theta_sqrt_n * sqrt_q - z_alpha
-    z_seq_one = theta_sqrt_n * (2 - psi) / sqrt_q - z_alpha
+    if lam == 1:
+        z_alpha = scipy.stats.norm.ppf(1 - alpha)
+        root_z = theta_hat * np.sqrt(N) * np.sqrt(1 - psi) - z_alpha
+        return root_z, z_to_open_probability(root_z)
 
-    candidates = [z_seq_zero, z_seq_one]
+    # f'(z) = slope - (1 - lam) * phi(z), so possible extrema occur where
+    # the normal density equals slope / (1 - lam). Splitting at those points
+    # lets the right-to-left brentq scan find the largest root when multiple
+    # roots are possible.
+    slope = lam * np.sqrt(1 - psi) / (theta_hat * np.sqrt(N))
+    density_threshold = slope / (1 - lam)
+    critical_points = []
+    max_density = scipy.stats.norm.pdf(0)
+    if 0 < density_threshold < max_density:
+        radius = np.sqrt(-2 * np.log(density_threshold * np.sqrt(2 * np.pi)))
+        critical_points = [-radius, radius]
 
-    if 0 < lam < 1:
-        critical_density = lam * sqrt_q / ((1 - lam) * theta_sqrt_n)
-        max_density = scipy.stats.norm.pdf(0)
-        if 0 < critical_density <= max_density:
-            radius = np.sqrt(-2 * np.log(critical_density * np.sqrt(2 * np.pi)))
-            candidates.extend([-radius, radius])
+    left = -8.0
+    while root_objective_z(left) > 0 and left > -1_000:
+        left *= 2
 
-    finite_candidates = [
-        z for z in candidates
-        if np.isfinite(z) and z_seq_zero <= z <= z_seq_one
-    ]
+    right = 8.0
+    while root_objective_z(right) < 0 and right < 1_000:
+        right *= 2
 
-    if not finite_candidates:
-        return np.nan
+    points = [left, *critical_points, right]
+    points = [point for point in points if left <= point <= right]
+    points = sorted(set(points))
 
-    best_z = min(finite_candidates, key=objective_z)
-    return z_to_open_probability(best_z)
+    root_z = np.nan
+    for interval_left, interval_right in reversed(list(zip(points[:-1], points[1:]))):
+        left_value = root_objective_z(interval_left)
+        right_value = root_objective_z(interval_right)
+
+        if right_value == 0:
+            root_z = interval_right
+            break
+        if left_value == 0:
+            root_z = interval_left
+            break
+        if left_value * right_value < 0:
+            root_z = scipy.optimize.brentq(
+                root_objective_z,
+                interval_left,
+                interval_right,
+            )
+            break
+
+    if not np.isfinite(root_z):
+        return np.nan, np.nan
+
+    return root_z, z_to_open_probability(root_z)
 
 
 def seq_power_rng(sample, alpha, beta, rng):
@@ -123,11 +147,12 @@ def run_one_task(task):
 
     split_sample = rng.normal(theta, 1, split_n)
     theta_hat = split_sample.mean()
-    b_hat = minimize_bounded_objective_b(lam, alpha, psi, theta_hat, N)
+    z_hat, b_hat = largest_root(lam, alpha, psi, theta_hat, N)
 
     if not np.isfinite(b_hat) or b_hat <= 0 or b_hat >= 1:
         return {
             "theta_hat": theta_hat,
+            "z_hat": z_hat,
             "b_hat": b_hat,
             "split_n": split_n,
             "remaining_n": remaining_n,
@@ -154,6 +179,7 @@ def run_one_task(task):
 
     return {
         "theta_hat": theta_hat,
+        "z_hat": z_hat,
         "b_hat": b_hat,
         "split_n": split_n,
         "remaining_n": remaining_n,
@@ -205,6 +231,7 @@ def run_task_chunk(chunk_id, tasks):
                 "psi": task["psi"],
                 "inner_m": INNER_M,
                 "theta_hat": None,
+                "z_hat": None,
                 "b_hat": None,
                 "split_n": None,
                 "remaining_n": None,
