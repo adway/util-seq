@@ -16,12 +16,12 @@ from helpers.sample import stopping_time
 
 
 M = 500
-INNER_M = 10
+INNER_M = 50
 
 thetas = [0.05, 0.10, 0.5, 1]
-N_grid = [1_000, 5_000, 10_000, 50_000]
-alphas = [0.01, 0.05]
-lambdas = [0.25, 0.50, 0.75]
+N_grid = [1_000, 2_000, 5_000, 10_000]
+alphas = [0.05]
+lambdas = [0.50]
 psis = [0.10, 0.25, 0.50, 0.75, 0.90]
 
 N_JOBS = 500
@@ -47,44 +47,55 @@ def root_objective(b, lam, alpha, psi, theta_hat, N):
     return lam * seq_term + (1 - lam) * (1 - b)
 
 
-def max_root_b(lam, alpha, psi, theta_hat, N, grid_size=2000):
-    if not np.isfinite(theta_hat) or theta_hat == 0:
+def bounded_objective_b(b, lam, alpha, psi, theta_hat, N):
+    seq_term = root_objective(b, 1, alpha, psi, theta_hat, N)
+    return lam * np.clip(seq_term, 0, 1) + (1 - lam) * (1 - b)
+
+
+def minimize_bounded_objective_b(lam, alpha, psi, theta_hat, N):
+    if not np.isfinite(theta_hat) or theta_hat <= 0:
         return np.nan
 
-    eps = 1e-10
-    grid = np.linspace(eps, 1 - eps, grid_size)
-    values = root_objective(grid, lam, alpha, psi, theta_hat, N)
+    def z_to_open_probability(z):
+        b = scipy.stats.norm.cdf(z)
+        return np.clip(b, np.nextafter(0.0, 1.0), np.nextafter(1.0, 0.0))
 
-    roots = []
-    finite = np.isfinite(values)
-    for left_idx, right_idx in zip(np.flatnonzero(finite)[:-1], np.flatnonzero(finite)[1:]):
-        left = grid[left_idx]
-        right = grid[right_idx]
-        f_left = values[left_idx]
-        f_right = values[right_idx]
+    def seq_term_z(z):
+        z_alpha = scipy.stats.norm.ppf(1 - alpha)
+        return - (1 - psi) + (
+            np.sqrt(1 - psi) * (z_alpha + z)
+            / (theta_hat * np.sqrt(N))
+        )
 
-        if f_left == 0:
-            roots.append(left)
-        elif f_left * f_right < 0:
-            roots.append(
-                scipy.optimize.brentq(
-                    root_objective,
-                    left,
-                    right,
-                    args=(lam, alpha, psi, theta_hat, N),
-                    xtol=1e-12,
-                    rtol=1e-12,
-                    maxiter=100,
-                )
-            )
+    def objective_z(z):
+        b = scipy.stats.norm.cdf(z)
+        return lam * np.clip(seq_term_z(z), 0, 1) + (1 - lam) * (1 - b)
 
-    if finite[-1] and values[-1] == 0:
-        roots.append(grid[-1])
+    z_alpha = scipy.stats.norm.ppf(1 - alpha)
+    sqrt_q = np.sqrt(1 - psi)
+    theta_sqrt_n = theta_hat * np.sqrt(N)
+    z_seq_zero = theta_sqrt_n * sqrt_q - z_alpha
+    z_seq_one = theta_sqrt_n * (2 - psi) / sqrt_q - z_alpha
 
-    if not roots:
+    candidates = [z_seq_zero, z_seq_one]
+
+    if 0 < lam < 1:
+        critical_density = lam * sqrt_q / ((1 - lam) * theta_sqrt_n)
+        max_density = scipy.stats.norm.pdf(0)
+        if 0 < critical_density <= max_density:
+            radius = np.sqrt(-2 * np.log(critical_density * np.sqrt(2 * np.pi)))
+            candidates.extend([-radius, radius])
+
+    finite_candidates = [
+        z for z in candidates
+        if np.isfinite(z) and z_seq_zero <= z <= z_seq_one
+    ]
+
+    if not finite_candidates:
         return np.nan
 
-    return max(roots)
+    best_z = min(finite_candidates, key=objective_z)
+    return z_to_open_probability(best_z)
 
 
 def seq_power_rng(sample, alpha, beta, rng):
@@ -112,7 +123,7 @@ def run_one_task(task):
 
     split_sample = rng.normal(theta, 1, split_n)
     theta_hat = split_sample.mean()
-    b_hat = max_root_b(lam, alpha, psi, theta_hat, N)
+    b_hat = minimize_bounded_objective_b(lam, alpha, psi, theta_hat, N)
 
     if not np.isfinite(b_hat) or b_hat <= 0 or b_hat >= 1:
         return {
