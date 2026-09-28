@@ -1,6 +1,11 @@
 import argparse
+import os
 from itertools import product
+from pathlib import Path
 
+os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
+
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import scipy.optimize
@@ -12,6 +17,7 @@ LAMBDAS = [0.25, 0.50, 0.75]
 PSIS = [0.10, 0.25, 0.50, 0.75, 0.90]
 THETAS = [0.1, 0.5, 1.0]
 N_GRID = [1000, 2000, 5000, 10000, 20000, 50000]
+PLOTDIR = Path("plots")
 
 RED = "\033[31m"
 RESET = "\033[0m"
@@ -234,6 +240,108 @@ def build_dataframe(mode):
     return df
 
 
+def plot_minimum_results(df):
+    PLOTDIR.mkdir(parents=True, exist_ok=True)
+
+    for theta in sorted(df["theta"].unique()):
+        theta_df = df[df["theta"] == theta]
+        lambda_values = sorted(theta_df["lambda"].unique())
+        fig, axes = plt.subplots(
+            nrows=len(lambda_values),
+            ncols=2,
+            figsize=(12, 4 * len(lambda_values)),
+            sharex=True,
+            constrained_layout=True,
+        )
+
+        axes = np.atleast_2d(axes)
+
+        for row_idx, lam in enumerate(lambda_values):
+            lam_df = theta_df[theta_df["lambda"] == lam]
+            for psi in sorted(lam_df["psi"].unique()):
+                series = lam_df[lam_df["psi"] == psi].sort_values("N")
+                label = f"psi={psi:.2f}"
+                axes[row_idx, 0].plot(
+                    series["N"], series["min_z"], marker="o", label=label
+                )
+                axes[row_idx, 1].plot(
+                    series["N"], series["g_at_min"], marker="o", label=label
+                )
+
+            axes[row_idx, 0].set_title(f"lambda={lam:.2f}: min_z")
+            axes[row_idx, 1].set_title(f"lambda={lam:.2f}: g_at_min")
+
+        for ax_row in axes:
+            for ax in ax_row:
+                ax.set_xscale("log")
+                ax.set_xlabel("N")
+                ax.grid(True, alpha=0.3)
+
+        for row_idx in range(len(lambda_values)):
+            axes[row_idx, 0].set_ylabel("Minimum z")
+            axes[row_idx, 1].set_ylabel("Objective at minimum")
+            axes[row_idx, 1].axhline(
+                0.0, color="black", linewidth=1, linestyle="--", alpha=0.6
+            )
+            axes[row_idx, 1].legend(loc="best", fontsize=8)
+
+        fig.suptitle(f"Split clipped objective minima, theta={theta}")
+        outfile = PLOTDIR / f"split_clipped_minimum_theta_{theta}.png"
+        fig.savefig(outfile, dpi=200, bbox_inches="tight")
+        plt.close(fig)
+
+
+def plot_root_results(df):
+    PLOTDIR.mkdir(parents=True, exist_ok=True)
+
+    for theta in sorted(df["theta"].unique()):
+        theta_df = df[df["theta"] == theta]
+        lambda_values = sorted(theta_df["lambda"].unique())
+        fig, axes = plt.subplots(
+            nrows=len(lambda_values),
+            ncols=2,
+            figsize=(12, 4 * len(lambda_values)),
+            sharex=True,
+            constrained_layout=True,
+        )
+
+        axes = np.atleast_2d(axes)
+
+        for row_idx, lam in enumerate(lambda_values):
+            lam_df = theta_df[theta_df["lambda"] == lam]
+            for psi in sorted(lam_df["psi"].unique()):
+                series = lam_df[lam_df["psi"] == psi].sort_values("N")
+                label = f"psi={psi:.2f}"
+                axes[row_idx, 0].plot(
+                    series["N"], series["max_root_z"], marker="o", label=label
+                )
+                axes[row_idx, 1].plot(
+                    series["N"], series["g_at_max_root"], marker="o", label=label
+                )
+
+            axes[row_idx, 0].set_title(f"lambda={lam:.2f}: max_root_z")
+            axes[row_idx, 1].set_title(f"lambda={lam:.2f}: g_at_max_root")
+
+        for ax_row in axes:
+            for ax in ax_row:
+                ax.set_xscale("log")
+                ax.set_xlabel("N")
+                ax.grid(True, alpha=0.3)
+
+        for row_idx in range(len(lambda_values)):
+            axes[row_idx, 0].set_ylabel("Largest root z")
+            axes[row_idx, 1].set_ylabel("Objective at largest root")
+            axes[row_idx, 1].axhline(
+                0.0, color="black", linewidth=1, linestyle="--", alpha=0.6
+            )
+            axes[row_idx, 1].legend(loc="best", fontsize=8)
+
+        fig.suptitle(f"Split clipped root summary, theta={theta}")
+        outfile = PLOTDIR / f"split_clipped_roots_theta_{theta}.png"
+        fig.savefig(outfile, dpi=200, bbox_inches="tight")
+        plt.close(fig)
+
+
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -242,12 +350,23 @@ def parse_args():
         default="roots",
         help="Whether to find roots or the minimum of the objective.",
     )
+    parser.add_argument(
+        "--plot",
+        action="store_true",
+        help="Save plots for minimum-mode results to the plots directory.",
+    )
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
     df = build_dataframe(args.mode)
+
+    if args.plot:
+        if args.mode == "minimum":
+            plot_minimum_results(df)
+        else:
+            plot_root_results(df)
 
     pd.set_option("display.max_columns", None)
     pd.set_option("display.width", 260)
