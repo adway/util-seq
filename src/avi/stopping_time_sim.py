@@ -10,6 +10,7 @@ import pandas as pd
 import submitit
 
 SRC = Path(__file__).resolve().parents[1]
+ROOT = SRC.parent
 sys.path.insert(0, str(SRC))
 
 from avi._config import (ALPHAS, AVI, LOGDIR, M, N_GRID, N_JOBS, RHOS,
